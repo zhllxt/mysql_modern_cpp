@@ -652,7 +652,9 @@ namespace mysql
 
 		template<typename T> inline recordset& operator << (const T& val)
 		{
-			if (!this->stmt_) return (*this);
+			if (!this->stmt_ || !this->ibinder_) return (*this);
+
+			if (!(this->iindex_ < this->ibinder_->binds.size())) return (*this);
 
 			using type = std::remove_cv_t<std::remove_reference_t<T>>;
 
