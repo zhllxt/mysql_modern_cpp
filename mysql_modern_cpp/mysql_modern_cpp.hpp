@@ -332,7 +332,8 @@ namespace mysql
 		struct convert<bool>
 		{
 			template<class ...Args> inline static bool stov(Args&&... args) { return (str2l(std::forward<Args>(args)...) != 0); }
-			template<class Args> inline static bool ntov(Args&& args) { return (args == std::decay_t<Args>(0)); }
+			template<class Args> inline static bool ntov(Args&& args) { return (args != std::decay_t<Args>(0)); }
+			template<class Args> inline static bool ttov(Args&& args) { std::tm tm = mysql_time_to_tm(std::forward<Args>(args)); return static_cast<bool>(std::mktime(&tm)); }
 		};
 
 		template<>
@@ -340,6 +341,7 @@ namespace mysql
 		{
 			template<class ...Args> inline static char stov(Args&&... args) { return static_cast<char>(str2l(std::forward<Args>(args)...)); }
 			template<class Args> inline static char ntov(Args&& args) { return static_cast<char>(std::forward<Args>(args)); }
+			template<class Args> inline static char ttov(Args&& args) { std::tm tm = mysql_time_to_tm(std::forward<Args>(args)); return static_cast<char>(std::mktime(&tm)); }
 		};
 
 		template<>
@@ -347,6 +349,7 @@ namespace mysql
 		{
 			template<class ...Args> inline static unsigned char stov(Args&&... args) { return static_cast<unsigned char>(str2ul(std::forward<Args>(args)...)); }
 			template<class Args> inline static unsigned char ntov(Args&& args) { return static_cast<unsigned char>(std::forward<Args>(args)); }
+			template<class Args> inline static unsigned char ttov(Args&& args) { std::tm tm = mysql_time_to_tm(std::forward<Args>(args)); return static_cast<unsigned char>(std::mktime(&tm)); }
 		};
 
 		template<>
@@ -354,6 +357,7 @@ namespace mysql
 		{
 			template<class ...Args> inline static short stov(Args&&... args) { return static_cast<short>(str2l(std::forward<Args>(args)...)); }
 			template<class Args> inline static short ntov(Args&& args) { return static_cast<short>(std::forward<Args>(args)); }
+			template<class Args> inline static short ttov(Args&& args) { std::tm tm = mysql_time_to_tm(std::forward<Args>(args)); return static_cast<short>(std::mktime(&tm)); }
 		};
 
 		template<>
@@ -361,6 +365,7 @@ namespace mysql
 		{
 			template<class ...Args> inline static unsigned short stov(Args&&... args) { return static_cast<unsigned short>(str2ul(std::forward<Args>(args)...)); }
 			template<class Args> inline static unsigned short ntov(Args&& args) { return static_cast<unsigned short>(std::forward<Args>(args)); }
+			template<class Args> inline static unsigned short ttov(Args&& args) { std::tm tm = mysql_time_to_tm(std::forward<Args>(args)); return static_cast<unsigned short>(std::mktime(&tm)); }
 		};
 
 		template<>
@@ -416,6 +421,7 @@ namespace mysql
 		{
 			template<class ...Args> inline static float stov(Args&&... args) { return str2f(std::forward<Args>(args)...); }
 			template<class Args> inline static float ntov(Args&& args) { return static_cast<float>(std::forward<Args>(args)); }
+			template<class Args> inline static float ttov(Args&& args) { std::tm tm = mysql_time_to_tm(std::forward<Args>(args)); return static_cast<float>(std::mktime(&tm)); }
 		};
 
 		template<>
@@ -423,6 +429,7 @@ namespace mysql
 		{
 			template<class ...Args> inline static double stov(Args&&... args) { return str2d(std::forward<Args>(args)...); }
 			template<class Args> inline static double ntov(Args&& args) { return static_cast<double>(std::forward<Args>(args)); }
+			template<class Args> inline static double ttov(Args&& args) { std::tm tm = mysql_time_to_tm(std::forward<Args>(args)); return static_cast<double>(std::mktime(&tm)); }
 		};
 
 		template<>
@@ -430,6 +437,7 @@ namespace mysql
 		{
 			template<class ...Args> inline static long double stov(Args&&... args) { return str2ld(std::forward<Args>(args)...); }
 			template<class Args> inline static long double ntov(Args&& args) { return static_cast<long double>(std::forward<Args>(args)); }
+			template<class Args> inline static long double ttov(Args&& args) { std::tm tm = mysql_time_to_tm(std::forward<Args>(args)); return static_cast<long double>(std::mktime(&tm)); }
 		};
 
 		template<>
@@ -818,6 +826,9 @@ namespace mysql
 			return (*this);
 		}
 
+		/**
+		 * Retrieve one row of records
+		 */
 		template<typename... Args> inline bool fetch(Args&&... args)
 		{
 			if (!this->stmt_) return false;
@@ -835,6 +846,9 @@ namespace mysql
 			return true;
 		}
 
+		/**
+		 * execute the prepare statement
+		 */
 		inline recordset& execute()
 		{
 			while (!this->executed_ && this->stmt_)
@@ -893,18 +907,47 @@ namespace mysql
 			return (*this);
 		}
 
-		std::uint64_t affected_rows()
+		/**
+		 * Return the number of rows affected or retrieved.
+		 * Usually used for "insert, update, delete, select"
+		 */
+		std::uint64_t affect_rows()
 		{
-			if (this->stmt_)
-				return mysql_stmt_affected_rows(this->stmt_);
-			return 0;
+			return (this->stmt_ ? mysql_stmt_affected_rows(this->stmt_) : 0);
 		}
 
+		/**
+		 * Return the number of rows in the result set.
+		 * Usually used for "select"
+		 */
+		std::uint64_t result_rows()
+		{
+			return (this->stmt_ ? mysql_stmt_num_rows(this->stmt_) : 0);
+		}
+
+		/**
+		 * Sets the output format for the date string, default is "{:%Y-%m-%d}"
+		 */
 		inline recordset& set_date_format    (std::string s) { this->date_format_     = s; return (*this); }
+		/**
+		 * Sets the output format for the time string, default is "{:%H:%M:%S}"
+		 */
 		inline recordset& set_time_format    (std::string s) { this->time_format_     = s; return (*this); }
+		/**
+		 * Sets the output format for the date and time string, default is "{:%Y-%m-%d %H:%M:%S}"
+		 */
 		inline recordset& set_datetime_format(std::string s) { this->datetime_format_ = s; return (*this); }
+		/**
+		 * Sets the output format for the integer string, default is "{}"
+		 */
 		inline recordset& set_integer_format (std::string s) { this->integer_format_  = s; return (*this); }
+		/**
+		 * Sets the output format for the float and double string, default is "{}"
+		 */
 		inline recordset& set_floating_format(std::string s) { this->floating_format_ = s; return (*this); }
+		/**
+		 * Sets the output format for every column
+		 */
 		template<typename... Args>
 		inline recordset& set_fields_format(Args&&... args)
 		{
@@ -912,16 +955,27 @@ namespace mysql
 			return (*this);
 		}
 
+		/**
+		 * returns the error code for the most recently invoked prepare statement api function
+		 * call mysql_stmt_errno internal
+		 */
 		unsigned int errid()
 		{
 			return (this->stmt_ ? mysql_stmt_errno(this->stmt_) : 0);
 		}
 
+		/**
+		 * returns a null-terminated string containing the error message for the most recently invoked prepare statement api function
+		 * call mysql_stmt_error internal
+		 */
 		const char * error()
 		{
 			return (this->stmt_ ? mysql_stmt_error(this->stmt_) : "");
 		}
 
+		/**
+		 * returns a pointer of MYSQL_STMT
+		 */
 		MYSQL_STMT* native_handle() { return this->stmt_; }
 
 		inline recordset& swap(recordset&& other) noexcept
@@ -1204,11 +1258,18 @@ namespace mysql
 			return (*this);
 		}
 
+		/**
+		 * Construct a prepare statement for the sql, but do not execute the prepare statement immediately,
+		 * it will be executed automatically when the recordset object is destroyed
+		 */
 		recordset operator<<(const std::string_view& sql)
 		{
 			return recordset(&conn_, sql);
 		}
 
+		/**
+		 * Construct a prepare statement and execute it immediately
+		 */
 		template<typename... Args>
 		recordset execute(const std::string_view& sql, Args&&... args)
 		{
@@ -1217,6 +1278,10 @@ namespace mysql
 			return rs;
 		}
 
+		/**
+		 * set the default character set for the current connection, such as "utf8" "gbk" and so on
+		 * call mysql_set_character_set internal
+		 */
 		database& set_charset(const std::string_view& charset)
 		{
 			// "SET NAMES GBK"
@@ -1229,21 +1294,36 @@ namespace mysql
 			return (*this);
 		}
 
+		/**
+		 * Checks whether the connection to the server is working
+		 * call mysql_ping internal
+		 */
 		inline bool is_alive()
 		{
 			return mysql_ping(&conn_) == 0;
 		}
 
+		/**
+		 * returns the error code for the most recently invoked API function
+		 * call mysql_errno internal
+		 */
 		unsigned int errid()
 		{
 			return mysql_errno(&conn_);
 		}
 
+		/**
+		 * returns a null-terminated string containing the error message for the most recently invoked API function
+		 * call mysql_error internal
+		 */
 		const char * error()
 		{
 			return mysql_error(&conn_);
 		}
 
+		/**
+		 * returns a refrence of MYSQL
+		 */
 		MYSQL& native_handle() { return this->conn_; }
 
 	protected:
