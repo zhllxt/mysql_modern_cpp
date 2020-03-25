@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <ctime>
+#include <cassert>
 
 #include <string>
 #include <vector>
@@ -30,6 +31,10 @@
 #include <fmt/chrono.h>
 
 #include <mysql.h>
+
+#if !defined(NDEBUG) && !defined(_DEBUG) && !defined(DEBUG)
+#define NDEBUG
+#endif
 
 // init
 // prepare
@@ -664,6 +669,8 @@ namespace mysql
 
 			if (!(this->iindex_ < this->ibinder_->binds.size())) return (*this);
 
+			this->current_mode_ = 'i';
+
 			using type = std::remove_cv_t<std::remove_reference_t<T>>;
 
 			MYSQL_BIND& bind = this->ibinder_->binds[iindex_];
@@ -739,9 +746,29 @@ namespace mysql
 			{
 				bind.buffer_type = MYSQL_TYPE_NULL;
 			}
+			else if constexpr (std::is_same_v<type, std::tm>)
+			{
+				data.capacity = sizeof(MYSQL_TIME);
+				buffer.reset(new char[sizeof(MYSQL_TIME)]);
+				MYSQL_TIME* mysql_time = reinterpret_cast<MYSQL_TIME*>(buffer.get());
+
+				mysql_time->second = val.tm_sec;   // seconds after the minute - [0, 60] including leap second
+				mysql_time->minute = val.tm_min;   // minutes after the hour - [0, 59]
+				mysql_time->hour = val.tm_hour;  // hours since midnight - [0, 23]
+				mysql_time->day = val.tm_mday;  // day of the month - [1, 31]
+				mysql_time->month = val.tm_mon + 1;   // months since January - [0, 11]
+				mysql_time->year = val.tm_year + 1900;  // years since 1900
+				mysql_time->second_part = 0;
+				mysql_time->neg = false;
+				mysql_time->time_type = MYSQL_TIMESTAMP_DATETIME;
+				mysql_time->time_zone_displacement = 0;
+
+				bind.buffer_type = MYSQL_TYPE_DATETIME;
+			}
 			else
 			{
-				std::ignore = true;
+				(const_cast<T&>(val)).orm(*this);
+				return (*this);
 			}
 
 			bind.buffer = (void *)buffer.get();
@@ -758,27 +785,35 @@ namespace mysql
 		}
 
 		template <typename T, std::size_t I = 0>
-		inline typename std::enable_if_t<false
-			|| std::is_floating_point_v<T>
-			|| std::is_integral_v<T>
-			|| std::is_same_v<T, std::string>
-			|| std::is_same_v<T, std::u16string>
-			|| std::is_same_v<T, std::string_view>
-			|| std::is_same_v<T, std::tm>
-			|| std::is_same_v<T, binder*>
-			, recordset&> operator>>(T& val)
+		inline typename std::enable_if_t<!detail::is_callable_v<T>, recordset&> operator>>(T& val)
 		{
 			if (!this->stmt_) return (*this);
 
+			this->current_mode_ = 'o';
+
 			this->execute();
 
-			int status = mysql_stmt_fetch(this->stmt_);
-			if (status == 1)
-				throw std::runtime_error(mysql_stmt_error(this->stmt_));
-			else if (status == MYSQL_NO_DATA)
-				return (*this);
+			if constexpr (false
+				|| std::is_floating_point_v<T>
+				|| std::is_integral_v<T>
+				|| std::is_same_v<T, std::string>
+				|| std::is_same_v<T, std::u16string>
+				|| std::is_same_v<T, std::string_view>
+				|| std::is_same_v<T, std::tm>
+				|| std::is_same_v<T, binder*>)
+			{
+				int status = mysql_stmt_fetch(this->stmt_);
+				if (status == 1)
+					throw std::runtime_error(mysql_stmt_error(this->stmt_));
+				else if (status == MYSQL_NO_DATA)
+					return (*this);
 
-			val = this->buffer_to_val<T>(I);
+				val = this->buffer_to_val<T>(I);
+			}
+			else
+			{
+				val.orm(*this);
+			}
 
 			return (*this);
 		}
@@ -791,6 +826,8 @@ namespace mysql
 		template<typename... Args> inline recordset& operator>>(std::tuple<Args...>& val)
 		{
 			if (!this->stmt_) return (*this);
+
+			this->current_mode_ = 'o';
 
 			this->execute();
 
@@ -808,21 +845,56 @@ namespace mysql
 		template <typename Fn>
 		inline typename std::enable_if_t<detail::is_callable_v<Fn>, recordset&> operator>>(Fn&& function)
 		{
+			return ((*this) >> function);
+		}
+
+		template <typename Fn>
+		inline typename std::enable_if_t<detail::is_callable_v<Fn>, recordset&> operator>>(Fn& function)
+		{
+			return ((*this) >> const_cast<const Fn&>(function));
+		}
+
+		template <typename Fn>
+		inline typename std::enable_if_t<detail::is_callable_v<Fn>, recordset&> operator>>(const Fn& function)
+		{
 			if (!this->stmt_) return (*this);
+
+			this->current_mode_ = 'o';
 
 			this->execute();
 
+			using fun_traits_type = detail::function_traits<Fn>;
+			using T = typename fun_traits_type::template args<0>::type;
+
 			while (true)
 			{
-				int status = mysql_stmt_fetch(this->stmt_);
-				if (status == 1)
-					throw std::runtime_error(mysql_stmt_error(this->stmt_));
-				else if (status == MYSQL_NO_DATA)
-					break;
+				if constexpr (fun_traits_type::argc == 1 && !(false
+					|| std::is_floating_point_v<T>
+					|| std::is_integral_v<T>
+					|| std::is_same_v<T, std::string>
+					|| std::is_same_v<T, std::u16string>
+					|| std::is_same_v<T, std::string_view>
+					|| std::is_same_v<T, std::tm>
+					|| std::is_same_v<T, binder*>))
+				{
+					T val{};
+					if (val.orm(*this))
+						function(val);
+					else
+						break;
+				}
+				else
+				{
+					int status = mysql_stmt_fetch(this->stmt_);
+					if (status == 1)
+						throw std::runtime_error(mysql_stmt_error(this->stmt_));
+					else if (status == MYSQL_NO_DATA)
+						break;
 
-				using fun_traits_type = detail::function_traits<Fn>;
-				fetcher<fun_traits_type::argc>::fetch(*this, function);
+					fetcher<fun_traits_type::argc>::fetch(*this, function);
+				}
 			}
+
 			return (*this);
 		}
 
@@ -833,17 +905,60 @@ namespace mysql
 		{
 			if (!this->stmt_) return false;
 
+			this->current_mode_ = 'o';
+
 			this->execute();
 
-			int status = mysql_stmt_fetch(this->stmt_);
-			if (status == 1)
-				throw std::runtime_error(mysql_stmt_error(this->stmt_));
-			else if (status == MYSQL_NO_DATA)
-				return false;
+			using tuple_type = std::tuple<std::decay_t<Args>...>;
+			using T = std::remove_cv_t<std::remove_reference_t<std::tuple_element_t<0, tuple_type>>>;
 
-			fetcher<sizeof...(Args)>::fetch_args(*this, std::make_index_sequence<sizeof...(Args)>{}, std::forward<Args>(args)...);
+			if constexpr (sizeof...(Args) == 1 && !(false
+				|| std::is_floating_point_v<T>
+				|| std::is_integral_v<T>
+				|| std::is_same_v<T, std::string>
+				|| std::is_same_v<T, std::u16string>
+				|| std::is_same_v<T, std::string_view>
+				|| std::is_same_v<T, std::tm>
+				|| std::is_same_v<T, binder*>))
+			{
+				(args.orm(*this), ...);
+				return true;
+			}
+			else
+			{
+				int status = mysql_stmt_fetch(this->stmt_);
+				if (status == 1)
+					throw std::runtime_error(mysql_stmt_error(this->stmt_));
+				else if (status == MYSQL_NO_DATA)
+					return false;
 
-			return true;
+				fetcher<sizeof...(Args)>::fetch_args(*this, std::make_index_sequence<sizeof...(Args)>{}, std::forward<Args>(args)...);
+
+				return true;
+			}
+		}
+
+		/**
+		 * Retrieve one row of records
+		 */
+		template<typename... Args> inline bool operator()(Args&&... args)
+		{
+			if /**/ (this->current_mode_ == 'i')
+			{
+				(((*this) << std::forward<Args>(args)), ...);
+				return true;
+			}
+			else if (this->current_mode_ == 'o')
+			{
+				return fetch(std::forward<Args>(args)...);
+			}
+			else
+			{
+#if defined(_DEBUG) || defined(DEBUG)
+				assert(false);
+#endif
+			}
+			return false;
 		}
 
 		/**
@@ -990,6 +1105,7 @@ namespace mysql
 			std::swap(this->integer_format_        ,other.integer_format_     );
 			std::swap(this->floating_format_       ,other.floating_format_    );
 			std::swap(this->fields_format_	       ,other.fields_format_	  );
+			std::swap(this->current_mode_          ,other.current_mode_       );
 			std::swap(this->iindex_                ,other.iindex_             );
 			std::swap(this->ibinder_			   ,other.ibinder_			  );
 			std::swap(this->obinder_			   ,other.obinder_			  );
@@ -1175,6 +1291,7 @@ namespace mysql
 		std::string                                        integer_format_     = "{}";
 		std::string                                        floating_format_    = "{}";
 		std::vector<std::string>                           fields_format_;
+		char                                               current_mode_       = '\0';
 		int                                                iindex_             = 0;
 		std::unique_ptr<bind_data>                         ibinder_;
 		std::unique_ptr<bind_data>                         obinder_;
