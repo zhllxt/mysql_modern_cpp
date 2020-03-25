@@ -9,6 +9,7 @@
 #include <cstdio>
 
 #include <iostream>
+#include <thread>
 
 #include "mysql_modern_cpp.hpp"
 
@@ -22,6 +23,19 @@
 
 using namespace std;
 
+struct user
+{
+	std::string name;
+	int age{};
+	std::tm birth{};
+
+	template <class Recordset>
+	bool orm(Recordset & rs)
+	{
+		return rs(name, age, birth);
+	}
+};
+
 int main(int argc, char* argv[])
 {
 #if defined(_WIN32)
@@ -32,6 +46,13 @@ int main(int argc, char* argv[])
 	{
 		mysql::database db;
 		db.connect("localhost", "root", "123456", "mir3_user");
+		db.set_charset("gbk");
+
+		(db << "show variables like 'character%';").set_fields_format("{:30}", "{}")
+			>> [](std::string name, std::string value)
+		{
+			printf("%s %s\n", name.data(), value.data());
+		};
 
 		// R"()" 是 c++ 11 的 raw string 语法，避免字符串换行时还要在行尾添加反斜杠
 		db << R"(CREATE TABLE `tbl_user` (
@@ -58,11 +79,24 @@ int main(int argc, char* argv[])
 			<< "1990-03-14 15:15:15"
 			<< "admin";
 
+		user u;
+		// 查询数据到自定义结构体中
+		db << "select name,age,birth from tbl_user where name=?" << "admin" >> u;
+		db.execute("select name,age,birth from tbl_user where name=?", "admin").fetch(u);
+		db << "select name,age,birth from tbl_user" >> [](user u)
+		{
+			printf("%s %d\n", u.name.data(), u.age);
+		};
+
+		// 自定义结构体的信息添加到数据库中
+		u.name += std::to_string(std::rand());
+		db << "insert into tbl_user (name,age,birth) values (?,?,?)" << u;
+
 		db << "delete from tbl_user  where name=?;"
-			<< "tester";
+			<< "爱新觉罗刘能";
 
 		// 直接调用 db.execute 会直接执行sql语句 如果出现错误可以进到示例这里最后面的catch块中
-		db.execute("insert into tbl_user values (?, ?, ?);", "tester", 32, "2020-03-14 10:10:10");
+		db.execute("insert into tbl_user values (?, ?, ?);", "爱新觉罗刘能", 32, "2020-03-14 10:10:10");
 
 		std::string name, age, birth;
 
