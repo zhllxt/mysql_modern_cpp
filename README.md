@@ -9,8 +9,22 @@ A simple C++ class for operating mysql database
 * header only,基于C++17,依赖fmt库(fmt库也是header only的,而且fmt库是即将进入c++20标准的format库);
 
 ```c++
+struct user
+{
+	std::string name;
+	int age{};
+	std::tm birth{};
+
+	template <class Recordset>
+	bool orm(Recordset & rs)
+	{
+		return rs(name, age, birth);
+	}
+};
+
 mysql::database db;
 db.connect("localhost", "root", "123456", "mir3_user");
+db.set_charset("gbk");
 
 // R"()" 是 c++ 11 的 raw string 语法，避免字符串换行时还要在行尾添加反斜杠
 db << R"(CREATE TABLE `tbl_user` (
@@ -36,6 +50,20 @@ db << "update tbl_user set age=?,birth=? where name=?;"
 	<< 55
 	<< "1990-03-14 15:15:15"
 	<< "admin";
+
+user u;
+// 查询数据到自定义结构体中
+db << "select name,age,birth from tbl_user where name=?" << "admin" >> u;
+db.execute("select name,age,birth from tbl_user where name=?", "admin").fetch(u);
+db << "select name,age,birth from tbl_user" >> [](user u)
+{
+	printf("%s %d\n", u.name.data(), u.age);
+};
+
+// 自定义结构体的信息添加到数据库中
+u.name += std::to_string(std::rand());
+db << "insert into tbl_user (name,age,birth) values (?,?,?)" << u;
+
 
 db << "delete from tbl_user  where name=?;"
 	<< "tester";
