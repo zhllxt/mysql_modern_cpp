@@ -25,15 +25,37 @@
 #include <type_traits>
 #include <algorithm>
 #include <utility>
+#include <chrono>
+
+#include <mysql.h>
 
 #define FMT_HEADER_ONLY
 #include <fmt/format.h>
 #include <fmt/chrono.h>
 
-#include <mysql.h>
-
 #if !defined(NDEBUG) && !defined(_DEBUG) && !defined(DEBUG)
 #define NDEBUG
+#endif
+
+#ifdef  _MSC_VER
+#  pragma warning(push)
+#  pragma warning(disable:4996)
+#endif //  _MSC_VER
+
+#if defined(__GNUC__) || defined(__GNUG__)
+#  pragma GCC diagnostic push
+//#  pragma GCC diagnostic ignored "-Wunused-variable"
+#  pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+
+#if defined(__clang__)
+#  pragma clang diagnostic push
+//#  pragma clang diagnostic ignored "-Wunused-variable"
+//#  pragma clang diagnostic ignored "-Wexceptions"
+#  pragma clang diagnostic ignored "-Wdeprecated-declarations"
+//#  pragma clang diagnostic ignored "-Wunused-private-field"
+//#  pragma clang diagnostic ignored "-Wunused-local-typedef"
+//#  pragma clang diagnostic ignored "-Wunknown-warning-option"
 #endif
 
 // init
@@ -267,9 +289,9 @@ namespace mysql
 			case MYSQL_TYPE_STRING:
 			case MYSQL_TYPE_VAR_STRING:
 			case MYSQL_TYPE_VARCHAR:
-#if LIBMYSQL_VERSION_ID > 50700
+#if MYSQL_VERSION_ID > 50700
 			case MYSQL_TYPE_JSON:
-#endif //LIBMYSQL_VERSION_ID > 50700
+#endif //MYSQL_VERSION_ID > 50700
 				return type{ new char[field->max_length + 1], field->max_length + 1 };
 			case MYSQL_TYPE_DECIMAL:
 			case MYSQL_TYPE_NEWDECIMAL:
@@ -281,29 +303,24 @@ namespace mysql
 			case MYSQL_TYPE_SET:
 			case MYSQL_TYPE_GEOMETRY:
 			case MYSQL_TYPE_NEWDATE:
+			// The MYSQL_TYPE_TIME2, MYSQL_TYPE_DATETIME2, and MYSQL_TYPE_TIMESTAMP2) type codes are used only on
+			// the server side. Clients see the MYSQL_TYPE_TIME, MYSQL_TYPE_DATETIME, and MYSQL_TYPE_TIMESTAMP codes.
+#if MYSQL_VERSION_ID >= 80011
 			case MYSQL_TYPE_TIMESTAMP2:
 			case MYSQL_TYPE_DATETIME2:
 			case MYSQL_TYPE_TIME2:
-#if LIBMYSQL_VERSION_ID >= 80019
+#endif //MYSQL_VERSION_ID >= 80011
+#if MYSQL_VERSION_ID >= 80019
 			case MYSQL_TYPE_TYPED_ARRAY:
-#endif //LIBMYSQL_VERSION_ID >= 80019
+#endif //MYSQL_VERSION_ID >= 80019
 			default:
 				// TODO: Andrey, there can be crashes when we go through this. Please fix.
 				throw std::runtime_error("allocate_buffer_for_field: invalid rbind data type");
 			}
 		}
 
-		template<class Args> inline std::tm mysql_time_to_tm(Args&& args)
+		template<typename = void> std::tm mysql_time_to_tm_impl(MYSQL_TIME* mysql_time)
 		{
-			MYSQL_TIME* mysql_time = nullptr;
-
-			if constexpr (std::is_pointer_v<std::remove_cv_t<std::remove_reference_t<Args>>>)
-				mysql_time = args;
-			else if constexpr (std::is_reference_v<std::remove_cv_t<Args>>)
-				mysql_time = &args;
-			else
-				std::ignore = true;
-
 			std::tm tm = { 0 };
 			if (mysql_time)
 			{
@@ -317,8 +334,46 @@ namespace mysql
 				tm.tm_yday = 0;  // days since January 1 - [0, 365]
 				tm.tm_isdst = 0; // daylight savings time flag
 			}
-
 			return tm;
+		}
+
+		template<class Args> inline std::tm mysql_time_to_tm(Args&& args)
+		{
+			MYSQL_TIME* mysql_time = nullptr;
+
+			if constexpr (std::is_pointer_v<std::remove_cv_t<std::remove_reference_t<Args>>>)
+				mysql_time = args;
+			else if constexpr (std::is_reference_v<std::remove_cv_t<Args>>)
+				mysql_time = &args;
+			else
+				std::ignore = true;
+
+			return mysql_time_to_tm_impl(mysql_time);
+		}
+
+		template<class Args> inline std::chrono::time_point<std::chrono::system_clock> mysql_time_to_system_clock(Args&& args)
+		{
+			MYSQL_TIME* mysql_time = nullptr;
+
+			if constexpr (std::is_pointer_v<std::remove_cv_t<std::remove_reference_t<Args>>>)
+				mysql_time = args;
+			else if constexpr (std::is_reference_v<std::remove_cv_t<Args>>)
+				mysql_time = &args;
+			else
+				std::ignore = true;
+
+			if (mysql_time)
+			{
+				std::tm tm = mysql_time_to_tm_impl(mysql_time);
+
+				std::chrono::system_clock::time_point t = std::chrono::system_clock::from_time_t(std::mktime(&tm));
+				std::chrono::microseconds s = std::chrono::duration_cast<std::chrono::microseconds>(t.time_since_epoch());
+				s += std::chrono::microseconds(mysql_time->second_part);
+
+				return (std::chrono::time_point<std::chrono::system_clock>{s});
+			}
+
+			return (std::chrono::time_point<std::chrono::system_clock>{});
 		}
 
 		template<typename = void> long               str2l  (const char *str, char **str_end = nullptr, int base = 10) { return strtol  (str, str_end, base); }
@@ -453,6 +508,14 @@ namespace mysql
 			template<class Args> inline static std::tm ttov(Args&& args) { return mysql_time_to_tm(std::forward<Args>(args)); }
 		};
 
+		template<>
+		struct convert<std::chrono::time_point<std::chrono::system_clock>>
+		{
+			template<class Args> inline static std::chrono::time_point<std::chrono::system_clock> stov(Args&&) { return std::chrono::time_point<std::chrono::system_clock>{}; }
+			template<class Args> inline static std::chrono::time_point<std::chrono::system_clock> ntov(Args&&) { return std::chrono::time_point<std::chrono::system_clock>{}; }
+			template<class Args> inline static std::chrono::time_point<std::chrono::system_clock> ttov(Args&& args) { return mysql_time_to_system_clock(std::forward<Args>(args)); }
+		};
+
 		template<class CharT, class Traits, class Allocator>
 		struct convert<std::basic_string<CharT, Traits, Allocator>>
 		{
@@ -559,14 +622,42 @@ namespace mysql
 
 	struct binder
 	{
+		using bool_t = std::remove_pointer_t<decltype(MYSQL_BIND::is_null)>;
+
 		MYSQL_FIELD         * field    = nullptr;
 		MYSQL_BIND          * bind     = nullptr;
 		unsigned long         length   = 0;
-		bool                  is_null  = false;
-		bool                  error    = false;
+		bool_t                is_null  = false;
+		bool_t                error    = false;
 		std::unique_ptr<char> buffer;
 		std::size_t           capacity = 0;
 	};
+
+	class error_code
+	{
+	public:
+		unsigned int val = 0;
+		const char * msg = "";
+
+		inline void clear()
+		{
+			val = 0;
+			msg = "";
+		}
+
+		inline void assign(unsigned int v, const char * m)
+		{
+			val = v;
+			msg = m;
+		}
+
+		inline unsigned int value  () { return val; }
+		inline const char * message() { return msg; }
+	};
+
+	struct endl_t {};
+
+	constexpr static endl_t endl;
 
 	class recordset
 	{
@@ -607,24 +698,47 @@ namespace mysql
 		};
 	public:
 		template<class... Args>
-		recordset(MYSQL* conn, const std::string_view& sql, Args&&... args) : conn_(conn)
+		recordset(MYSQL* conn, std::function<void(error_code)>* error_func, error_code* err_orcode,
+			const std::string_view& sql, Args&&... args)
+			: conn_(conn)
+			, error_func_(error_func)
+			, error_code_(err_orcode)
 		{
-			this->stmt_ = mysql_stmt_init(conn_);
-			if (!this->stmt_)
-				throw std::runtime_error("Out of memory");
-
-			if (mysql_stmt_prepare(this->stmt_, sql.data(), static_cast<unsigned long>(sql.size())))
-				throw std::runtime_error(mysql_stmt_error(this->stmt_));
-
-			this->res_ = mysql_stmt_result_metadata(this->stmt_);
-			if (!this->res_ && mysql_stmt_errno(this->stmt_))
-				throw std::runtime_error(mysql_stmt_error(this->stmt_));
-
-			unsigned long param_count = mysql_stmt_param_count(this->stmt_);
-			if (param_count)
+			try
 			{
-				this->ibinder_ = std::make_unique<bind_data>(nullptr, param_count);
-				(((*this) << std::forward<Args>(args)), ...);
+				this->stmt_ = mysql_stmt_init(conn_);
+				if (!this->stmt_)
+					throw std::runtime_error("Out of memory");
+
+				if (mysql_stmt_prepare(this->stmt_, sql.data(), static_cast<unsigned long>(sql.size())))
+					throw std::runtime_error(mysql_stmt_error(this->stmt_));
+
+				this->res_ = mysql_stmt_result_metadata(this->stmt_);
+				if (!this->res_ && mysql_stmt_errno(this->stmt_))
+					throw std::runtime_error(mysql_stmt_error(this->stmt_));
+
+				unsigned long param_count = mysql_stmt_param_count(this->stmt_);
+				if (param_count)
+				{
+					this->ibinder_ = std::make_unique<bind_data>(nullptr, param_count);
+					(((*this) << std::forward<Args>(args)), ...);
+				}
+			}
+			catch (std::exception const& e)
+			{
+				check_error(error_val(), e.what());
+
+				if (this->res_)
+				{
+					mysql_free_result(this->res_);
+					this->res_ = nullptr;
+				}
+
+				if (this->stmt_)
+				{
+					mysql_stmt_close(this->stmt_);
+					this->stmt_ = nullptr;
+				}
 			}
 		}
 		~recordset()
@@ -633,9 +747,9 @@ namespace mysql
 			{
 				this->execute();
 			}
-			catch (...)
+			catch (std::runtime_error const& e)
 			{
-				std::ignore = true;
+				std::ignore = e;
 			}
 
 			if (this->res_)
@@ -663,11 +777,14 @@ namespace mysql
 			return this->swap(std::move(other));
 		}
 
+		/*
+		 * bind prepared statement parameters
+		 */
 		template<typename T> inline recordset& operator << (const T& val)
 		{
 			if (!this->stmt_ || !this->ibinder_) return (*this);
 
-			if (!(this->iindex_ < this->ibinder_->binds.size())) return (*this);
+			if (!(this->iindex_ < static_cast<int>(this->ibinder_->binds.size()))) return (*this);
 
 			this->current_mode_ = 'i';
 
@@ -750,18 +867,50 @@ namespace mysql
 			{
 				data.capacity = sizeof(MYSQL_TIME);
 				buffer.reset(new char[sizeof(MYSQL_TIME)]);
+				memset((void*)buffer.get(), 0, sizeof(MYSQL_TIME));
 				MYSQL_TIME* mysql_time = reinterpret_cast<MYSQL_TIME*>(buffer.get());
 
-				mysql_time->second = val.tm_sec;   // seconds after the minute - [0, 60] including leap second
-				mysql_time->minute = val.tm_min;   // minutes after the hour - [0, 59]
-				mysql_time->hour = val.tm_hour;  // hours since midnight - [0, 23]
-				mysql_time->day = val.tm_mday;  // day of the month - [1, 31]
-				mysql_time->month = val.tm_mon + 1;   // months since January - [0, 11]
-				mysql_time->year = val.tm_year + 1900;  // years since 1900
+				mysql_time->second      = val.tm_sec;          // seconds after the minute - [0, 60] including leap second
+				mysql_time->minute      = val.tm_min;          // minutes after the hour - [0, 59]
+				mysql_time->hour        = val.tm_hour;         // hours since midnight - [0, 23]
+				mysql_time->day         = val.tm_mday;         // day of the month - [1, 31]
+				mysql_time->month       = val.tm_mon + 1;      // months since January - [0, 11]
+				mysql_time->year        = val.tm_year + 1900;  // years since 1900
 				mysql_time->second_part = 0;
-				mysql_time->neg = false;
-				mysql_time->time_type = MYSQL_TIMESTAMP_DATETIME;
+				mysql_time->neg         = false;
+				mysql_time->time_type   = MYSQL_TIMESTAMP_DATETIME;
+#if MYSQL_VERSION_ID >= 80011
 				mysql_time->time_zone_displacement = 0;
+#endif //MYSQL_VERSION_ID >= 80011
+
+				bind.buffer_type = MYSQL_TYPE_DATETIME;
+			}
+			else if constexpr (std::is_same_v<type, std::chrono::time_point<std::chrono::system_clock>>)
+			{
+				data.capacity = sizeof(MYSQL_TIME);
+				buffer.reset(new char[sizeof(MYSQL_TIME)]);
+				memset((void*)buffer.get(), 0, sizeof(MYSQL_TIME));
+				MYSQL_TIME* mysql_time = reinterpret_cast<MYSQL_TIME*>(buffer.get());
+
+				std::time_t t = std::chrono::system_clock::to_time_t(val);
+				std::tm tm = *std::localtime(&t);
+
+				auto microseconds = (std::max<typename std::chrono::microseconds::rep>)(0,
+					std::chrono::duration_cast<std::chrono::microseconds>(val.time_since_epoch()).count() -
+					(std::chrono::duration_cast<std::chrono::seconds>(val.time_since_epoch()).count() * 1000000));
+
+				mysql_time->second      = tm.tm_sec;          // seconds after the minute - [0, 60] including leap second
+				mysql_time->minute      = tm.tm_min;          // minutes after the hour - [0, 59]
+				mysql_time->hour        = tm.tm_hour;         // hours since midnight - [0, 23]
+				mysql_time->day         = tm.tm_mday;         // day of the month - [1, 31]
+				mysql_time->month       = tm.tm_mon + 1;      // months since January - [0, 11]
+				mysql_time->year        = tm.tm_year + 1900;  // years since 1900
+				mysql_time->second_part = static_cast<unsigned long>(microseconds);
+				mysql_time->neg         = false;
+				mysql_time->time_type   = MYSQL_TIMESTAMP_DATETIME;
+#if MYSQL_VERSION_ID >= 80011
+				mysql_time->time_zone_displacement = 0;
+#endif //MYSQL_VERSION_ID >= 80011
 
 				bind.buffer_type = MYSQL_TYPE_DATETIME;
 			}
@@ -784,6 +933,17 @@ namespace mysql
 			return ((*this) << (const char *)(str));
 		}
 
+		/*
+		 * execute the prepared statement immediately, othwise the prepared statement will
+		 * be executed when this recordset object about to be destroyed.
+		 */
+		inline recordset& operator <<(endl_t)
+		{
+			this->execute();
+
+			return (*this);
+		}
+
 		template <typename T, std::size_t I = 0>
 		inline typename std::enable_if_t<!detail::is_callable_v<T>, recordset&> operator>>(T& val)
 		{
@@ -793,6 +953,14 @@ namespace mysql
 
 			this->execute();
 
+			this->oindex_ = 0;
+
+			int status = mysql_stmt_fetch(this->stmt_);
+			if (status == 1)
+				check_error(status);
+			else if (status == MYSQL_NO_DATA)
+				return (*this);
+
 			if constexpr (false
 				|| std::is_floating_point_v<T>
 				|| std::is_integral_v<T>
@@ -800,14 +968,9 @@ namespace mysql
 				|| std::is_same_v<T, std::u16string>
 				|| std::is_same_v<T, std::string_view>
 				|| std::is_same_v<T, std::tm>
+				|| std::is_same_v<T, std::chrono::time_point<std::chrono::system_clock>>
 				|| std::is_same_v<T, binder*>)
 			{
-				int status = mysql_stmt_fetch(this->stmt_);
-				if (status == 1)
-					throw std::runtime_error(mysql_stmt_error(this->stmt_));
-				else if (status == MYSQL_NO_DATA)
-					return (*this);
-
 				val = this->buffer_to_val<T>(I);
 			}
 			else
@@ -831,9 +994,11 @@ namespace mysql
 
 			this->execute();
 
+			this->oindex_ = 0;
+
 			int status = mysql_stmt_fetch(this->stmt_);
 			if (status == 1)
-				throw std::runtime_error(mysql_stmt_error(this->stmt_));
+				check_error(status);
 			else if (status == MYSQL_NO_DATA)
 				return (*this);
 
@@ -868,6 +1033,14 @@ namespace mysql
 
 			while (true)
 			{
+				this->oindex_ = 0;
+
+				int status = mysql_stmt_fetch(this->stmt_);
+				if (status == 1)
+					check_error(status);
+				else if (status == MYSQL_NO_DATA)
+					break;
+
 				if constexpr (fun_traits_type::argc == 1 && !(false
 					|| std::is_floating_point_v<T>
 					|| std::is_integral_v<T>
@@ -875,6 +1048,7 @@ namespace mysql
 					|| std::is_same_v<T, std::u16string>
 					|| std::is_same_v<T, std::string_view>
 					|| std::is_same_v<T, std::tm>
+					|| std::is_same_v<T, std::chrono::time_point<std::chrono::system_clock>>
 					|| std::is_same_v<T, binder*>))
 				{
 					T val{};
@@ -885,12 +1059,6 @@ namespace mysql
 				}
 				else
 				{
-					int status = mysql_stmt_fetch(this->stmt_);
-					if (status == 1)
-						throw std::runtime_error(mysql_stmt_error(this->stmt_));
-					else if (status == MYSQL_NO_DATA)
-						break;
-
 					fetcher<fun_traits_type::argc>::fetch(*this, function);
 				}
 			}
@@ -909,29 +1077,39 @@ namespace mysql
 
 			this->execute();
 
+			this->oindex_ = 0;
+
+			int status = mysql_stmt_fetch(this->stmt_);
+			if (status == 1)
+				check_error(status);
+			else if (status == MYSQL_NO_DATA)
+				return false;
+
 			using tuple_type = std::tuple<std::decay_t<Args>...>;
 			using T = std::remove_cv_t<std::remove_reference_t<std::tuple_element_t<0, tuple_type>>>;
 
-			if constexpr (sizeof...(Args) == 1 && !(false
-				|| std::is_floating_point_v<T>
-				|| std::is_integral_v<T>
-				|| std::is_same_v<T, std::string>
-				|| std::is_same_v<T, std::u16string>
-				|| std::is_same_v<T, std::string_view>
-				|| std::is_same_v<T, std::tm>
-				|| std::is_same_v<T, binder*>))
+			if constexpr (sizeof...(Args) == 1)
 			{
-				(args.orm(*this), ...);
+				if constexpr (
+					   std::is_floating_point_v<T>
+					|| std::is_integral_v<T>
+					|| std::is_same_v<T, std::string>
+					|| std::is_same_v<T, std::u16string>
+					|| std::is_same_v<T, std::string_view>
+					|| std::is_same_v<T, std::tm>
+					|| std::is_same_v<T, std::chrono::time_point<std::chrono::system_clock>>
+					|| std::is_same_v<T, binder*>)
+				{
+					fetcher<sizeof...(Args)>::fetch_args(*this, std::make_index_sequence<sizeof...(Args)>{}, std::forward<Args>(args)...);
+				}
+				else
+				{
+					(args.orm(*this), ...);
+				}
 				return true;
 			}
 			else
 			{
-				int status = mysql_stmt_fetch(this->stmt_);
-				if (status == 1)
-					throw std::runtime_error(mysql_stmt_error(this->stmt_));
-				else if (status == MYSQL_NO_DATA)
-					return false;
-
 				fetcher<sizeof...(Args)>::fetch_args(*this, std::make_index_sequence<sizeof...(Args)>{}, std::forward<Args>(args)...);
 
 				return true;
@@ -950,7 +1128,8 @@ namespace mysql
 			}
 			else if (this->current_mode_ == 'o')
 			{
-				return fetch(std::forward<Args>(args)...);
+				fetcher<sizeof...(Args)>::fetch_args(*this, this->oindex_, std::forward<Args>(args)...);
+				return true;
 			}
 			else
 			{
@@ -966,58 +1145,68 @@ namespace mysql
 		 */
 		inline recordset& execute()
 		{
-			while (!this->executed_ && this->stmt_)
+			if (this->executed_ || !(this->stmt_))
+				return (*this);
+
+			this->executed_ = true;
+
+			try
 			{
-				struct autocommit
+				for(;;)
 				{
-					recordset& rs;
-					autocommit(recordset& r) : rs(r) { mysql_autocommit(rs.conn_, false); }
-					~autocommit() { mysql_autocommit(rs.conn_, true); }
-				} autocommiter{ *this };
-
-				if (this->ibinder_)
-				{
-					if (mysql_stmt_bind_param(this->stmt_, this->ibinder_->binds.data()))
-						break;
-				}
-
-				if (mysql_stmt_execute(this->stmt_))
-				{
-					if (!this->res_)
+					struct auto_commit
 					{
-						mysql_rollback(conn_);
-					}
-					break;
-				}
-				else
-				{
-					if (!this->res_)
+						recordset& rs;
+						auto_commit(recordset& r) : rs(r) { mysql_autocommit(rs.conn_, false); }
+						~auto_commit() { mysql_autocommit(rs.conn_, true); }
+					} auto_commiter{ *this };
+
+					if (this->ibinder_)
 					{
-						mysql_commit(conn_);
+						if (mysql_stmt_bind_param(this->stmt_, this->ibinder_->binds.data()))
+							break;
 					}
+
+					if (mysql_stmt_execute(this->stmt_))
+					{
+						if (!this->res_)
+						{
+							mysql_rollback(conn_);
+						}
+						break;
+					}
+					else
+					{
+						if (!this->res_)
+						{
+							mysql_commit(conn_);
+						}
+					}
+
+					if (this->res_)
+					{
+						bool attr_max_length = true;
+						mysql_stmt_attr_set(this->stmt_, STMT_ATTR_UPDATE_MAX_LENGTH, (const void*)&attr_max_length);
+
+						if (mysql_stmt_store_result(this->stmt_))
+							break;
+
+						if (!this->obinder_)
+							this->obinder_ = std::make_unique<bind_data>(mysql_fetch_fields(this->res_), mysql_num_fields(this->res_));
+
+						if (mysql_stmt_bind_result(this->stmt_, &(this->obinder_->binds[0])))
+							break;
+					}
+
+					return (*this);
 				}
 
-				if (this->res_)
-				{
-					bool attr_max_length = true;
-					mysql_stmt_attr_set(this->stmt_, STMT_ATTR_UPDATE_MAX_LENGTH, (const void*)&attr_max_length);
-
-					if (mysql_stmt_store_result(this->stmt_))
-						break;
-
-					if (!this->obinder_)
-						this->obinder_ = std::make_unique<bind_data>(mysql_fetch_fields(this->res_), mysql_num_fields(this->res_));
-
-					if (mysql_stmt_bind_result(this->stmt_, &(this->obinder_->binds[0])))
-						break;
-				}
-
-				this->executed_ = true;
-
-				break;
+				check_error(error_val());
 			}
-
-			if (!this->executed_ && this->stmt_) throw std::runtime_error(mysql_stmt_error(this->stmt_));
+			catch (std::exception const& e)
+			{
+				check_error(error_val(), e.what());
+			}
 
 			return (*this);
 		}
@@ -1074,7 +1263,7 @@ namespace mysql
 		 * returns the error code for the most recently invoked prepare statement api function
 		 * call mysql_stmt_errno internal
 		 */
-		unsigned int errid()
+		unsigned int error_val()
 		{
 			return (this->stmt_ ? mysql_stmt_errno(this->stmt_) : 0);
 		}
@@ -1083,7 +1272,7 @@ namespace mysql
 		 * returns a null-terminated string containing the error message for the most recently invoked prepare statement api function
 		 * call mysql_stmt_error internal
 		 */
-		const char * error()
+		const char * error_msg()
 		{
 			return (this->stmt_ ? mysql_stmt_error(this->stmt_) : "");
 		}
@@ -1107,8 +1296,29 @@ namespace mysql
 			std::swap(this->fields_format_	       ,other.fields_format_	  );
 			std::swap(this->current_mode_          ,other.current_mode_       );
 			std::swap(this->iindex_                ,other.iindex_             );
+			std::swap(this->oindex_                ,other.oindex_             );
 			std::swap(this->ibinder_			   ,other.ibinder_			  );
 			std::swap(this->obinder_			   ,other.obinder_			  );
+			std::swap(this->error_func_			   ,other.error_func_		  );
+			std::swap(this->error_code_			   ,other.error_code_		  );
+
+			//other.conn_               = nullptr;
+			//other.stmt_               = nullptr;
+			//other.res_                = nullptr;
+			//other.executed_           = true;
+			//other.date_format_        = "{:%Y-%m-%d}";
+			//other.time_format_        = "{:%H:%M:%S}";
+			//other.datetime_format_    = "{:%Y-%m-%d %H:%M:%S}";
+			//other.integer_format_     = "{}";
+			//other.floating_format_    = "{}";
+			//other.fields_format_;
+			//other.current_mode_       = '\0';
+			//other.iindex_             = 0;
+			//other.oindex_             = 0;
+			//other.ibinder_            = nullptr;
+			//other.obinder_            = nullptr;
+			//other.error_func_         = nullptr;
+			//other.error_code_         = nullptr;
 
 			return (*this);
 		}
@@ -1122,162 +1332,219 @@ namespace mysql
 			|| std::is_same_v<T, std::u16string>
 			|| std::is_same_v<T, std::string_view>
 			|| std::is_same_v<T, std::tm>
+			|| std::is_same_v<T, std::chrono::time_point<std::chrono::system_clock>>
 			|| std::is_same_v<T, binder*>
 			, T> buffer_to_val(std::size_t i)
 		{
-			if (!this->obinder_) return T{};
-			if (this->obinder_->binds.size() <= i) return T{};
-
-			MYSQL_BIND& bind = this->obinder_->binds[i];
-			binder & data = this->obinder_->datas[i];
-			MYSQL_FIELD * field = data.field;
-
-			if (!field) return T{};
-
-			using type = std::remove_cv_t<std::remove_reference_t<T>>;
-			if constexpr (std::is_pointer_v<type> && std::is_same_v<binder, std::remove_pointer_t<type>>)
-				return ((T)(&data));
-			else
-				std::ignore = true;
-
-			switch (field->type)
+			try
 			{
-			case MYSQL_TYPE_YEAR:
-			case MYSQL_TYPE_TINY:
-			case MYSQL_TYPE_SHORT:
-			case MYSQL_TYPE_INT24:
-			case MYSQL_TYPE_LONG:
-			case MYSQL_TYPE_LONGLONG:
-			{
-				std::uint64_t ret = 0;
-				switch (bind.buffer_length)
+				if (!this->obinder_) return T{};
+				if (this->obinder_->binds.size() <= i) return T{};
+
+				MYSQL_BIND& bind = this->obinder_->binds[i];
+				binder & data = this->obinder_->datas[i];
+				MYSQL_FIELD * field = data.field;
+
+				if (!field) return T{};
+
+				using type = std::remove_cv_t<std::remove_reference_t<T>>;
+				if constexpr (std::is_pointer_v<type> && std::is_same_v<binder, std::remove_pointer_t<type>>)
+					return ((T)(&data));
+				else
+					std::ignore = true;
+
+				switch (field->type)
 				{
-				case 1:
-					if (bind.is_unsigned)
-						ret = !data.is_null ? *reinterpret_cast<std::uint8_t *>(bind.buffer) : 0;
-					else
-						ret = !data.is_null ? *reinterpret_cast<std::int8_t *>(bind.buffer) : 0;
-					break;
-				case 2:
-					if (bind.is_unsigned)
-						ret = !data.is_null ? *reinterpret_cast<std::uint16_t *>(bind.buffer) : 0;
-					else
-						ret = !data.is_null ? *reinterpret_cast<std::int16_t *>(bind.buffer) : 0;
-					break;
-				case 4:
-					if (bind.is_unsigned)
-						ret = !data.is_null ? *reinterpret_cast<std::uint32_t *>(bind.buffer) : 0;
-					else
-						ret = !data.is_null ? *reinterpret_cast<std::int32_t *>(bind.buffer) : 0;
-					break;
-				case 8:
-					if (bind.is_unsigned)
-						ret = !data.is_null ? *reinterpret_cast<std::uint64_t *>(bind.buffer) : 0;
-					else
-						ret = !data.is_null ? *reinterpret_cast<std::int64_t *>(bind.buffer) : 0;
-					break;
-				default:
-					throw std::runtime_error("MySQL_Prepared_ResultSet::getInt64_intern: invalid type");
-				}
-				if constexpr (std::is_same_v<std::string, T>)
-					return detail::converter<T>::tov(ret, this->fields_format_.size() > i ? this->fields_format_[i] : this->integer_format_);
-				else
-					return detail::converter<T>::tov(ret);
-			}
-			case MYSQL_TYPE_FLOAT:
-			{
-				float ret = !data.is_null ? *reinterpret_cast<float *>(bind.buffer) : 0.0f;
-				if constexpr (std::is_same_v<std::string, T>)
-					return detail::converter<T>::tov(ret, this->fields_format_.size() > i ? this->fields_format_[i] : this->floating_format_);
-				else
-					return detail::converter<T>::tov(ret);
-			}
-			case MYSQL_TYPE_DOUBLE:
-			{
-				double ret = !data.is_null ? *reinterpret_cast<double *>(bind.buffer) : 0.0;
-				if constexpr (std::is_same_v<std::string, T>)
-					return detail::converter<T>::tov(ret, this->fields_format_.size() > i ? this->fields_format_[i] : this->floating_format_);
-				else
-					return detail::converter<T>::tov(ret);
-			}
-			case MYSQL_TYPE_NULL:
-			{
-				break;
-			}
-			case MYSQL_TYPE_TIMESTAMP2:
-			case MYSQL_TYPE_DATETIME2:
-			case MYSQL_TYPE_NEWDATE:
-			case MYSQL_TYPE_TIME2:
-			case MYSQL_TYPE_TIMESTAMP:
-			case MYSQL_TYPE_DATE:
-			case MYSQL_TYPE_TIME:
-			case MYSQL_TYPE_DATETIME:
-			{
-				MYSQL_TIME * ret = data.is_null ? nullptr : static_cast<MYSQL_TIME *>(bind.buffer);
-				if constexpr (std::is_same_v<std::string, T>)
+				case MYSQL_TYPE_YEAR:
+				case MYSQL_TYPE_TINY:
+				case MYSQL_TYPE_SHORT:
+				case MYSQL_TYPE_INT24:
+				case MYSQL_TYPE_LONG:
+				case MYSQL_TYPE_LONGLONG:
 				{
-					std::string* format = &datetime_format_;
-					if /**/ (field->type == MYSQL_TYPE_DATE) format = &date_format_;
-					else if (field->type == MYSQL_TYPE_TIME) format = &time_format_;
-					else if (field->type == MYSQL_TYPE_NEWDATE) format = &date_format_;
-					else if (field->type == MYSQL_TYPE_TIME2) format = &time_format_;
-					return detail::converter<T>::tov(ret, this->fields_format_.size() > i ? this->fields_format_[i] : *format);
-				}
-				else
-					return detail::converter<T>::tov(ret);
-			}
-			case MYSQL_TYPE_BIT:
-			{
-				std::uint64_t ret = 0;
-				/* This length is in bytes, on the contrary to what can be seen in mysql_resultset.cpp where the Meta is used */
-				if (!data.is_null)
-				{
-					switch (data.length)
+					std::uint64_t ret = 0;
+					switch (bind.buffer_length)
 					{
-					case 8:ret = (std::uint64_t)bit_uint8korr(bind.buffer); break;
-					case 7:ret = (std::uint64_t)bit_uint7korr(bind.buffer); break;
-					case 6:ret = (std::uint64_t)bit_uint6korr(bind.buffer); break;
-					case 5:ret = (std::uint64_t)bit_uint5korr(bind.buffer); break;
-					case 4:ret = (std::uint64_t)bit_uint4korr(bind.buffer); break;
-					case 3:ret = (std::uint64_t)bit_uint3korr(bind.buffer); break;
-					case 2:ret = (std::uint64_t)bit_uint2korr(bind.buffer); break;
-					case 1:ret = (std::uint64_t)bit_uint1korr(bind.buffer); break;
+					case 1:
+						if (bind.is_unsigned)
+							ret = !data.is_null ? *reinterpret_cast<std::uint8_t *>(bind.buffer) : 0;
+						else
+							ret = !data.is_null ? *reinterpret_cast<std::int8_t *>(bind.buffer) : 0;
+						break;
+					case 2:
+						if (bind.is_unsigned)
+							ret = !data.is_null ? *reinterpret_cast<std::uint16_t *>(bind.buffer) : 0;
+						else
+							ret = !data.is_null ? *reinterpret_cast<std::int16_t *>(bind.buffer) : 0;
+						break;
+					case 4:
+						if (bind.is_unsigned)
+							ret = !data.is_null ? *reinterpret_cast<std::uint32_t *>(bind.buffer) : 0;
+						else
+							ret = !data.is_null ? *reinterpret_cast<std::int32_t *>(bind.buffer) : 0;
+						break;
+					case 8:
+						if (bind.is_unsigned)
+							ret = !data.is_null ? *reinterpret_cast<std::uint64_t *>(bind.buffer) : 0;
+						else
+							ret = !data.is_null ? *reinterpret_cast<std::int64_t *>(bind.buffer) : 0;
+						break;
+					default:
+						check_error(-1, "MySQL_Prepared_ResultSet::getInt64_intern: invalid type");
 					}
+					if constexpr (std::is_same_v<std::string, T>)
+						return detail::converter<T>::tov(ret,
+							this->fields_format_.size() > i ? this->fields_format_[i] : this->integer_format_);
+					else
+						return detail::converter<T>::tov(ret);
 				}
-				if constexpr (std::is_same_v<std::string, T>)
-					return detail::converter<T>::tov(ret, this->fields_format_.size() > i ? this->fields_format_[i] : this->integer_format_);
-				else
-					return detail::converter<T>::tov(ret);
+				case MYSQL_TYPE_FLOAT:
+				{
+					float ret = !data.is_null ? *reinterpret_cast<float *>(bind.buffer) : 0.0f;
+					if constexpr (std::is_same_v<std::string, T>)
+						return detail::converter<T>::tov(ret,
+							this->fields_format_.size() > i ? this->fields_format_[i] : this->floating_format_);
+					else
+						return detail::converter<T>::tov(ret);
+				}
+				case MYSQL_TYPE_DOUBLE:
+				{
+					double ret = !data.is_null ? *reinterpret_cast<double *>(bind.buffer) : 0.0;
+					if constexpr (std::is_same_v<std::string, T>)
+						return detail::converter<T>::tov(ret,
+							this->fields_format_.size() > i ? this->fields_format_[i] : this->floating_format_);
+					else
+						return detail::converter<T>::tov(ret);
+				}
+				case MYSQL_TYPE_NULL:
+				{
+					break;
+				}
+				// The MYSQL_TYPE_TIME2, MYSQL_TYPE_DATETIME2, and MYSQL_TYPE_TIMESTAMP2) type codes are used only on
+				// the server side. Clients see the MYSQL_TYPE_TIME, MYSQL_TYPE_DATETIME, and MYSQL_TYPE_TIMESTAMP codes.
+	#if MYSQL_VERSION_ID >= 80011
+				case MYSQL_TYPE_TIMESTAMP2:
+				case MYSQL_TYPE_DATETIME2:
+				case MYSQL_TYPE_TIME2:
+	#endif //MYSQL_VERSION_ID >= 80011
+				case MYSQL_TYPE_NEWDATE:
+				case MYSQL_TYPE_TIMESTAMP:
+				case MYSQL_TYPE_DATE:
+				case MYSQL_TYPE_TIME:
+				case MYSQL_TYPE_DATETIME:
+				{
+					MYSQL_TIME * ret = data.is_null ? nullptr : static_cast<MYSQL_TIME *>(bind.buffer);
+					if constexpr (std::is_same_v<std::string, T>)
+					{
+						std::string* format = &datetime_format_;
+						if /**/ (field->type == MYSQL_TYPE_DATE) format = &date_format_;
+						else if (field->type == MYSQL_TYPE_TIME) format = &time_format_;
+						else if (field->type == MYSQL_TYPE_NEWDATE) format = &date_format_;
+	#if MYSQL_VERSION_ID >= 80011
+						else if (field->type == MYSQL_TYPE_TIME2) format = &time_format_;
+	#endif //MYSQL_VERSION_ID >= 80011
+						return detail::converter<T>::tov(ret, this->fields_format_.size() > i ? this->fields_format_[i] : *format);
+					}
+					else
+						return detail::converter<T>::tov(ret);
+				}
+				case MYSQL_TYPE_BIT:
+				{
+					std::uint64_t ret = 0;
+					/* This length is in bytes, on the contrary to what can be 
+					 * seen in mysql_resultset.cpp where the Meta is used
+					 */
+					if (!data.is_null)
+					{
+						switch (data.length)
+						{
+						case 8:ret = (std::uint64_t)bit_uint8korr(bind.buffer); break;
+						case 7:ret = (std::uint64_t)bit_uint7korr(bind.buffer); break;
+						case 6:ret = (std::uint64_t)bit_uint6korr(bind.buffer); break;
+						case 5:ret = (std::uint64_t)bit_uint5korr(bind.buffer); break;
+						case 4:ret = (std::uint64_t)bit_uint4korr(bind.buffer); break;
+						case 3:ret = (std::uint64_t)bit_uint3korr(bind.buffer); break;
+						case 2:ret = (std::uint64_t)bit_uint2korr(bind.buffer); break;
+						case 1:ret = (std::uint64_t)bit_uint1korr(bind.buffer); break;
+						}
+					}
+					if constexpr (std::is_same_v<std::string, T>)
+						return detail::converter<T>::tov(ret, 
+							this->fields_format_.size() > i ? this->fields_format_[i] : this->integer_format_);
+					else
+						return detail::converter<T>::tov(ret);
+				}
+	#if MYSQL_VERSION_ID >= 80019
+				case MYSQL_TYPE_TYPED_ARRAY:
+	#endif //MYSQL_VERSION_ID >= 80019
+				case MYSQL_TYPE_DECIMAL:
+				case MYSQL_TYPE_NEWDECIMAL:
+				case MYSQL_TYPE_TINY_BLOB:
+				case MYSQL_TYPE_MEDIUM_BLOB:
+				case MYSQL_TYPE_LONG_BLOB:
+				case MYSQL_TYPE_BLOB:
+				case MYSQL_TYPE_ENUM:
+				case MYSQL_TYPE_SET:
+	#if MYSQL_VERSION_ID > 50700
+				case MYSQL_TYPE_JSON:
+	#endif //MYSQL_VERSION_ID > 50700
+				case MYSQL_TYPE_VARCHAR:
+				case MYSQL_TYPE_VAR_STRING:
+				case MYSQL_TYPE_STRING:
+				{
+					char* ret = reinterpret_cast<char*>(bind.buffer);
+					if (data.is_null)
+						ret[0] = '\0';
+					else
+						ret[data.length] = '\0';
+					if constexpr (std::is_same_v<std::string, T>)
+						return detail::converter<T>::tov(ret, this->fields_format_.size() > i ? this->fields_format_[i] : "{}");
+					else
+						return detail::converter<T>::tov(ret);
+				}
+				case MYSQL_TYPE_GEOMETRY:
+					break;
+				}
 			}
-#if LIBMYSQL_VERSION_ID >= 80019
-			case MYSQL_TYPE_TYPED_ARRAY:
-#endif //LIBMYSQL_VERSION_ID >= 80019
-			case MYSQL_TYPE_DECIMAL:
-			case MYSQL_TYPE_NEWDECIMAL:
-			case MYSQL_TYPE_TINY_BLOB:
-			case MYSQL_TYPE_MEDIUM_BLOB:
-			case MYSQL_TYPE_LONG_BLOB:
-			case MYSQL_TYPE_BLOB:
-			case MYSQL_TYPE_ENUM:
-			case MYSQL_TYPE_SET:
-#if LIBMYSQL_VERSION_ID > 50700
-			case MYSQL_TYPE_JSON:
-#endif //LIBMYSQL_VERSION_ID > 50700
-			case MYSQL_TYPE_VARCHAR:
-			case MYSQL_TYPE_VAR_STRING:
-			case MYSQL_TYPE_STRING:
+			catch (std::exception const& e)
 			{
-				char* ret = reinterpret_cast<char*>(bind.buffer);
-				ret[data.length] = '\0';
-				if constexpr (std::is_same_v<std::string, T>)
-					return detail::converter<T>::tov(ret, this->fields_format_.size() > i ? this->fields_format_[i] : "{}");
-				else
-					return detail::converter<T>::tov(ret);
-			}
-			case MYSQL_TYPE_GEOMETRY:
-				break;
+				check_error(error_val(), e.what());
 			}
 			return T{};
+		}
+
+		template<class IntegerT>
+		inline IntegerT check_error(IntegerT result, const char* msg = nullptr)
+		{
+			static_assert(std::is_integral_v<std::remove_cv_t<std::remove_reference_t<IntegerT>>>);
+
+			// Zero for success. Nonzero if an error occurred.
+			if (result || msg)
+			{
+				unsigned int val = result ? error_val() : static_cast<unsigned int>(-1);
+
+				if (!msg || (!(*msg)))
+				{
+					msg = error_msg();
+				}
+
+				if (error_func_ && (*error_func_))
+				{
+					error_code ec{ val,msg };
+					(*error_func_)(ec);
+				}
+
+				if (error_code_)
+				{
+					error_code_->assign(val, msg);
+				}
+				else
+				{
+					throw std::runtime_error(msg);
+				}
+			}
+
+			return result;
 		}
 
 	protected:
@@ -1293,8 +1560,11 @@ namespace mysql
 		std::vector<std::string>                           fields_format_;
 		char                                               current_mode_       = '\0';
 		int                                                iindex_             = 0;
+		int                                                oindex_             = 0;
 		std::unique_ptr<bind_data>                         ibinder_;
 		std::unique_ptr<bind_data>                         obinder_;
+		std::function<void(error_code)>                  * error_func_         = nullptr;
+		error_code                                       * error_code_         = nullptr;
 	};
 
 	template<std::size_t Count>
@@ -1337,6 +1607,12 @@ namespace mysql
 		{
 			((args = (db.buffer_to_val<std::remove_cv_t<std::remove_reference_t<Args>>>(I))), ...);
 		}
+
+		template<typename... Args>
+		static inline void fetch_args(recordset& db, int& oindex, Args&&... args)
+		{
+			((args = (db.buffer_to_val<std::remove_cv_t<std::remove_reference_t<Args>>>(std::size_t(oindex++)))), ...);
+		}
 	};
 
 	class database
@@ -1351,7 +1627,7 @@ namespace mysql
 			mysql_close(&conn_);
 		}
 
-		database& connect(
+		inline bool connect(
 			const std::string_view& host,
 			const std::string_view& user,
 			const std::string_view& passwd,
@@ -1366,31 +1642,45 @@ namespace mysql
 			mysql_options(&conn_, MYSQL_OPT_RECONNECT, (const void *)&reconnect);
 
 			if (!mysql_real_connect(&conn_, host.data(), user.data(), passwd.data(), db.data(), port, nullptr, 0))
-				throw std::runtime_error(mysql_error(&conn_));
+				return false;
 
-			// SET CHARACTER SET Statement
-			// charset_name may be quoted or unquoted.
-			//mysql_query(&conn_, "SET NAMES GBK");
-
-			return (*this);
+			return true;
 		}
 
 		/**
 		 * Construct a prepare statement for the sql, but do not execute the prepare statement immediately,
 		 * it will be executed automatically when the recordset object is destroyed
+		 * If an error occurs, will don't throw any exception
 		 */
-		recordset operator<<(const std::string_view& sql)
+		inline recordset operator<<(const std::string_view& sql)
 		{
-			return recordset(&conn_, sql);
+			static error_code ec;
+			ec.clear();
+			return recordset(&conn_, &error_func_, &ec, sql);
 		}
 
 		/**
 		 * Construct a prepare statement and execute it immediately
+		 * If an error occurs, will throw a exception
 		 */
 		template<typename... Args>
-		recordset execute(const std::string_view& sql, Args&&... args)
+		inline recordset execute(const std::string_view& sql, Args&&... args)
 		{
-			auto rs = recordset(&conn_, sql, std::forward<Args>(args)...);
+			auto rs = recordset(&conn_, &error_func_, nullptr, sql, std::forward<Args>(args)...);
+			rs.execute();
+			return rs;
+		}
+
+		/**
+		 * Construct a prepare statement and execute it immediately
+		 * If an error occurs, will don't throw any exception, the error information will
+		 * be saved in the ec
+		 */
+		template<typename... Args>
+		inline recordset execute(error_code& ec, const std::string_view& sql, Args&&... args)
+		{
+			ec.clear();
+			auto rs = recordset(&conn_, &error_func_, &ec, sql, std::forward<Args>(args)...);
 			rs.execute();
 			return rs;
 		}
@@ -1399,16 +1689,21 @@ namespace mysql
 		 * set the default character set for the current connection, such as "utf8" "gbk" and so on
 		 * call mysql_set_character_set internal
 		 */
-		database& set_charset(const std::string_view& charset)
+		inline bool set_charset(const std::string_view& charset)
 		{
 			// "SET NAMES GBK"
+
 			// SET CHARACTER SET Statement
 			// charset_name may be quoted or unquoted.
+
 			//std::string s = fmt::format("SET NAMES {}", charset);
 			//if (mysql_query(&conn_, s.data()))
-			//	throw std::runtime_error(mysql_error(&conn_));
-			mysql_set_character_set(&conn_, charset.data());
-			return (*this);
+			//	return false;
+
+			if (mysql_set_character_set(&conn_, charset.data()))
+				return false;
+
+			return true;
 		}
 
 		/**
@@ -1424,7 +1719,7 @@ namespace mysql
 		 * returns the error code for the most recently invoked API function
 		 * call mysql_errno internal
 		 */
-		unsigned int errid()
+		inline unsigned int error_val()
 		{
 			return mysql_errno(&conn_);
 		}
@@ -1433,7 +1728,7 @@ namespace mysql
 		 * returns a null-terminated string containing the error message for the most recently invoked API function
 		 * call mysql_error internal
 		 */
-		const char * error()
+		inline const char * error_msg()
 		{
 			return mysql_error(&conn_);
 		}
@@ -1441,11 +1736,37 @@ namespace mysql
 		/**
 		 * returns a refrence of MYSQL
 		 */
-		MYSQL& native_handle() { return this->conn_; }
+		inline MYSQL& native_handle() { return this->conn_; }
+
+		/**
+		 * set the error callback function
+		 * void (mysql::error_code ec)
+		 */
+		template<class Fun>
+		inline database& bind_error_callback(Fun&& error_cb)
+		{
+			error_func_ = std::forward<Fun>(error_cb);
+
+			return (*this);
+		}
 
 	protected:
-		MYSQL conn_;
+		MYSQL                           conn_;
+
+		std::function<void(error_code)> error_func_;
 	};
 }
+
+#if defined(__clang__)
+#  pragma clang diagnostic pop
+#endif
+
+#if defined(__GNUC__) || defined(__GNUG__)
+#  pragma GCC diagnostic pop
+#endif
+
+#ifdef _MSC_VER
+#  pragma warning(pop)
+#endif
 
 #undef FMT_HEADER_ONLY

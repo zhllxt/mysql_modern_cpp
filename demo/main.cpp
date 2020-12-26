@@ -13,6 +13,8 @@
 
 #include "mysql_modern_cpp.hpp"
 
+#include <pfr/pfr.hpp>
+
 #if defined(_MSC_VER)
 #if defined(_DEBUG)
 #pragma comment(lib,"libmysql.lib")
@@ -27,12 +29,19 @@ struct user
 {
 	std::string name;
 	int age{};
-	std::tm birth{};
+	//std::tm birth{};
+	std::chrono::system_clock::time_point birth{};
 
 	template <class Recordset>
 	bool orm(Recordset & rs)
 	{
-		return rs(name, age, birth);
+		bool result = true;
+		pfr::for_each_field(*this, [&](auto& field)
+		{
+			result &= rs(field);
+		});
+		return result;
+		//return rs(name, age, birth);
 	}
 };
 
@@ -44,7 +53,12 @@ int main(int argc, char* argv[])
 
 	try
 	{
+		mysql::error_code ec;
 		mysql::database db;
+		db.bind_error_callback([](mysql::error_code ec)
+		{
+			fmt::print("{} {}\n", ec.val, ec.msg);
+		});
 		db.connect("localhost", "root", "123456", "mir3_user");
 		db.set_charset("gbk");
 
@@ -54,7 +68,7 @@ int main(int argc, char* argv[])
 			printf("%s %s\n", name.data(), value.data());
 		};
 
-		// R"()" ÊÇ c++ 11 µÄ raw string Óï·¨£¬±ÜÃâ×Ö·û´®»»ĞĞÊ±»¹ÒªÔÚĞĞÎ²Ìí¼Ó·´Ğ±¸Ü
+		// R"()" æ˜¯ c++ 11 çš„ raw string è¯­æ³•ï¼Œé¿å…å­—ç¬¦ä¸²æ¢è¡Œæ—¶è¿˜è¦åœ¨è¡Œå°¾æ·»åŠ åæ–œæ 
 		db << R"(CREATE TABLE `tbl_user` (
 			`name` VARCHAR(20) NOT NULL,
 			`age` INT NULL DEFAULT NULL,
@@ -65,8 +79,8 @@ int main(int argc, char* argv[])
 			ENGINE = InnoDB
 			;)";
 
-		// "db << ..." ÕâÖÖ²Ù×÷·û·½Ê½»áÉú³ÉÒ»¸öÁÙÊ±±äÁ¿ µ±Õâ¸öÁÙÊ±±äÁ¿Ïú»ÙÊ±»áÔÚÎö¹¹º¯ÊıÖĞ×Ô¶¯Ö´ĞĞsqlÓï¾ä
-		// ×¢ÒâÕâÖÖÇé¿öÏÂÖ´ĞĞsqlÓï¾äÊ±Èç¹û³öÏÖ´íÎó²»»á½øµ½Ê¾ÀıÕâÀï×îºóÃæµÄcatch¿éÖĞ
+		// "db << ..." è¿™ç§æ“ä½œç¬¦æ–¹å¼ä¼šç”Ÿæˆä¸€ä¸ªä¸´æ—¶å˜é‡ å½“è¿™ä¸ªä¸´æ—¶å˜é‡é”€æ¯æ—¶ä¼šåœ¨ææ„å‡½æ•°ä¸­è‡ªåŠ¨æ‰§è¡Œsqlè¯­å¥
+		// æ³¨æ„è¿™ç§æƒ…å†µä¸‹æ‰§è¡Œsqlè¯­å¥æ—¶å¦‚æœå‡ºç°é”™è¯¯ä¸ä¼šè¿›åˆ°ç¤ºä¾‹è¿™é‡Œæœ€åé¢çš„catchå—ä¸­
 		db << "insert into tbl_user (name,age) values (?, ?);"
 			<< "admin"
 			<< 102;
@@ -80,7 +94,7 @@ int main(int argc, char* argv[])
 			<< "admin";
 
 		user u;
-		// ²éÑ¯Êı¾İµ½×Ô¶¨Òå½á¹¹ÌåÖĞ
+		// æŸ¥è¯¢æ•°æ®åˆ°è‡ªå®šä¹‰ç»“æ„ä½“ä¸­
 		db << "select name,age,birth from tbl_user where name=?" << "admin" >> u;
 		db.execute("select name,age,birth from tbl_user where name=?", "admin").fetch(u);
 		db << "select name,age,birth from tbl_user" >> [](user u)
@@ -88,15 +102,17 @@ int main(int argc, char* argv[])
 			printf("%s %d\n", u.name.data(), u.age);
 		};
 
-		// ×Ô¶¨Òå½á¹¹ÌåµÄĞÅÏ¢Ìí¼Óµ½Êı¾İ¿âÖĞ
+		// è‡ªå®šä¹‰ç»“æ„ä½“çš„ä¿¡æ¯æ·»åŠ åˆ°æ•°æ®åº“ä¸­
 		u.name += std::to_string(std::rand());
+		db.execute(ec, "insert into tbl_user  (name,age,birth) values (?, ?, ?);", u);
 		db << "insert into tbl_user (name,age,birth) values (?,?,?)" << u;
+		db << "insert into tbl_user values (?, ?, ?);" << u;
 
 		db << "delete from tbl_user  where name=?;"
-			<< "°®ĞÂ¾õÂŞÁõÄÜ";
+			<< "hanmeimei";
 
-		// Ö±½Óµ÷ÓÃ db.execute »áÖ±½ÓÖ´ĞĞsqlÓï¾ä Èç¹û³öÏÖ´íÎó¿ÉÒÔ½øµ½Ê¾ÀıÕâÀï×îºóÃæµÄcatch¿éÖĞ
-		db.execute("insert into tbl_user values (?, ?, ?);", "°®ĞÂ¾õÂŞÁõÄÜ", 32, "2020-03-14 10:10:10");
+		// ç›´æ¥è°ƒç”¨ db.execute ä¼šç›´æ¥æ‰§è¡Œsqlè¯­å¥ å¦‚æœå‡ºç°é”™è¯¯å¯ä»¥è¿›åˆ°ç¤ºä¾‹è¿™é‡Œæœ€åé¢çš„catchå—ä¸­
+		db.execute(ec, "insert into tbl_user values (?, ?, ?);", "hanmeimei", 32, "2020-03-14 10:10:10");
 
 		std::string name, age, birth;
 
@@ -107,26 +123,26 @@ int main(int argc, char* argv[])
 		db << "select name from tbl_user where age=55;"
 			>> name;
 
-		std::tm tm_birth{}; // ½«»ñÈ¡µ½µÄÈÕÆÚ´æ´¢µ½c++ÓïÑÔµÄ½á¹¹ÌåtmÖĞ
+		std::tm tm_birth{}; // å°†è·å–åˆ°çš„æ—¥æœŸå­˜å‚¨åˆ°c++è¯­è¨€çš„ç»“æ„ä½“tmä¸­
 		db << "select birth from tbl_user where name=?;"
 			<< name
 			>> tm_birth;
 
-		const char * inject_name = "admin' or 1=1 or '1=1"; // sql ×¢Èë
+		const char * inject_name = "admin' or 1=1 or '1=1"; // sql æ³¨å…¥
 		db << "select count(*) from tbl_user where name=?;"
 			<< inject_name
 			>> count;
 
-		// ½«»ñÈ¡µÄÄÚÈİ´æ´¢µ½°ó¶¨Êı¾İÖĞ ÕâÑùÄã¿ÉÒÔÖ±½Ó²Ù×÷Êı¾İµÄ»º³åÇøbuffer
-		// µ«´ËÊ±±ØĞëÒªÓÃauto rs = ÕâÖÖ·½Ê½½«recordsetÁÙÊ±±äÁ¿±£´æÆğÀ´
-		// ·ñÔòoperator>>½áÊøºóÁÙÊ±±äÁ¿¾ÍÏú»ÙÁË binder Ö¸ÕëÖ¸ÏòµÄÄÚÈİ¾ÍÊÇ·Ç·¨µÄÁË
+		// å°†è·å–çš„å†…å®¹å­˜å‚¨åˆ°ç»‘å®šæ•°æ®ä¸­ è¿™æ ·ä½ å¯ä»¥ç›´æ¥æ“ä½œæ•°æ®çš„ç¼“å†²åŒºbuffer
+		// ä½†æ­¤æ—¶å¿…é¡»è¦ç”¨auto rs = è¿™ç§æ–¹å¼å°†recordsetä¸´æ—¶å˜é‡ä¿å­˜èµ·æ¥
+		// å¦åˆ™operator>>ç»“æŸåä¸´æ—¶å˜é‡å°±é”€æ¯äº† binder æŒ‡é’ˆæŒ‡å‘çš„å†…å®¹å°±æ˜¯éæ³•çš„äº†
 		mysql::binder * binder = nullptr;
 		auto rs = db << "select birth from tbl_user where name='admin';";
 		rs >> binder;
 		MYSQL_TIME * time = (MYSQL_TIME *)(binder->buffer.get());
 		printf("%d-%d-%d %d:%d:%d\n", time->year, time->month, time->day, time->hour, time->minute, time->second);
 
-		// ²éÑ¯µ½Êı¾İºóÖ±½Óµ÷ÓÃ lambda »Øµ÷º¯Êı£¬ÓĞ¶àÉÙĞĞÊı¾İ£¬¾Í»áµ÷ÓÃ¶àÉÙ´Î
+		// æŸ¥è¯¢åˆ°æ•°æ®åç›´æ¥è°ƒç”¨ lambda å›è°ƒå‡½æ•°ï¼Œæœ‰å¤šå°‘è¡Œæ•°æ®ï¼Œå°±ä¼šè°ƒç”¨å¤šå°‘æ¬¡
 		(db << "select name,age,birth from tbl_user where age>?;")
 			<< 10
 			>> [](std::string_view name, int age, std::string birth)
@@ -142,17 +158,17 @@ int main(int argc, char* argv[])
 		{
 		};
 
-		// set_fields_format ÓÃÀ´ÉèÖÃ·µ»ØµÄ×Ö·û´®µÄ¸ñÊ½£¬×¢ÒâÖ»ÓĞ·µ»Ø×Ö·û´®Ê±²ÅÆğ×÷ÓÃ
-		// c++ 20 µÄformatÓï·¨
-		// {:>15} ±íÊ¾ÓÒ¶ÔÆë ¹²Õ¼15¸ö×Ö·ûµÄ¿í¶È
-		// {:04} ¹²Õ¼4¸ö×Ö·ûµÄ¿í¶È Èç¹û²»×ã4¸ö×Ö·ûÔÚÇ°Ãæ²¹0
+		// set_fields_format ç”¨æ¥è®¾ç½®è¿”å›çš„å­—ç¬¦ä¸²çš„æ ¼å¼ï¼Œæ³¨æ„åªæœ‰è¿”å›å­—ç¬¦ä¸²æ—¶æ‰èµ·ä½œç”¨
+		// c++ 20 çš„formatè¯­æ³•
+		// {:>15} è¡¨ç¤ºå³å¯¹é½ å…±å 15ä¸ªå­—ç¬¦çš„å®½åº¦
+		// {:04} å…±å 4ä¸ªå­—ç¬¦çš„å®½åº¦ å¦‚æœä¸è¶³4ä¸ªå­—ç¬¦åœ¨å‰é¢è¡¥0
 		rs = (db << "select name,age,birth from tbl_user;");
-		// ×Ü¹²selectÁËÈıÁĞÊı¾İ£¬ËùÒÔset_fields_format±ØĞëÒªÉèÖÃÈı¸ö¸ñÊ½ĞÅÏ¢
-		// ¿ÉÒÔµ÷ÓÃset_fields_formatÉèÖÃ¸ñÊ½£¬Èç¹ûµ÷ÓÃÁË¾Í±ØĞëÓĞ¼¸ÁĞ£¬¾ÍÌî¼¸¸ö¸ñÊ½ĞÅÏ¢
-		// Ò²¿ÉÒÔ²»µ÷ÓÃset_fields_format£¬´ËÊ±»áÊ¹ÓÃÄ¬ÈÏµÄ¸ñÊ½
+		// æ€»å…±selectäº†ä¸‰åˆ—æ•°æ®ï¼Œæ‰€ä»¥set_fields_formatå¿…é¡»è¦è®¾ç½®ä¸‰ä¸ªæ ¼å¼ä¿¡æ¯
+		// å¯ä»¥è°ƒç”¨set_fields_formatè®¾ç½®æ ¼å¼ï¼Œå¦‚æœè°ƒç”¨äº†å°±å¿…é¡»æœ‰å‡ åˆ—ï¼Œå°±å¡«å‡ ä¸ªæ ¼å¼ä¿¡æ¯
+		// ä¹Ÿå¯ä»¥ä¸è°ƒç”¨set_fields_formatï¼Œæ­¤æ—¶ä¼šä½¿ç”¨é»˜è®¤çš„æ ¼å¼
 		rs.set_fields_format("{:>15}", "{:04}", "{:%Y-%m-%d %H:%M:%S}");
 		auto rs2 = std::move(rs);
-		// °´ÕÕ×Ô¼ºµÄÒªÇóÒ»ĞĞÒ»ĞĞµÄ»ñÈ¡Êı¾İ
+		// æŒ‰ç…§è‡ªå·±çš„è¦æ±‚ä¸€è¡Œä¸€è¡Œçš„è·å–æ•°æ®
 		while (rs2.fetch(name, age, binder))
 		{
 			MYSQL_TIME * time = (MYSQL_TIME *)(binder->buffer.get());
